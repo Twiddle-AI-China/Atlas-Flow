@@ -1,4 +1,4 @@
-# MidiBrave
+# Atlas Flow: Explicit Timbre-Trajectory Modeling for a Navigable Latent-Space Synthesizer
 
 **Atlas Flow** turns a map of timbre into an instrument. Give it a fixed MIDI
 sequence, draw a path across the map, and the sequence plays back with its
