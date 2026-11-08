@@ -1,0 +1,45 @@
+{
+  "checkpoint": "atlas-flow-pad-v1-weights.pt",
+  "checkpointSha256": "eb30190770f85110d37885d03e8b2f82e6840546d8e78242e58ed0cdec954e88",
+  "graphs": {
+    "decoder": {
+      "bytes": 36783900,
+      "errorPeakDb": -88.0587453985082,
+      "errorRmsDb": -113.39195184819842,
+      "file": "decoder.onnx",
+      "inputs": [
+        "trajectory",
+        "note",
+        "window_start"
+      ],
+      "outputSamples": 220500,
+      "pass": true,
+      "sha256": "9af1181ac996d1d4573011f62ddb58a36b17f8cae2f880ed5b794b9f3a858d28",
+      "thresholdPeakDb": -70.0,
+      "thresholdRmsDb": -100.0,
+      "trajectoryFrames": 108
+    },
+    "flow": {
+      "bytes": 55441044,
+      "file": "flow.onnx",
+      "inputs": [
+        "noisy_residual",
+        "flow_time",
+        "history",
+        "history_anchor",
+        "anchor_path",
+        "atlas_path",
+        "lifecycle",
+        "history_mask"
+      ],
+      "pass": true,
+      "relativeError": 2.0745437723235227e-06,
+      "sha256": "8de4e4dcdcf183142bef0b1752823822663a4e219789760db7835ac14642445f",
+      "threshold": 0.0001
+    }
+  },
+  "pass": true,
+  "sampleRate": 44100,
+  "torch": "2.14.0",
+  "totalBytes": 92224944
+}
