@@ -21,6 +21,8 @@ env/
 *.ckpt
 *.safetensors
 *.onnx
+# ONNX puts weights in a sidecar next to the graph; that is the 90 MB half.
+*.onnx.data
 *.npz
 checkpoints/
 artifacts/
@@ -61,6 +63,19 @@ Thumbs.db
 *.swp
 *~
 
+# --- LaTeX build artifacts (docs/paper) ---
+# The built PDF is committed so README links resolve without a TeX install;
+# everything pdflatex/bibtex generate alongside it is not.
+*.aux
+*.bbl
+*.blg
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.toc
+docs/paper/*.log
+
 # --- Explicitly kept (evidence cited by the v5 handoff doc) ---
 !docs/assets/**
 !docs/evidence/**
@@ -73,3 +88,18 @@ local-model/
 electron/node_modules/
 electron/dist/
 electron/config.json
+
+# --- plugin third-party ---
+# JUCE is a submodule; ONNX Runtime is a 158 MB prebuilt drop fetched by
+# plugin/tools/fetch_onnxruntime.sh, so neither belongs in the tree.
+plugin/third_party/onnxruntime/
+
+# --- plugin dependencies, fetched not committed ---
+# ONNX Runtime comes down from the GitHub release; tools/fetch_onnxruntime.sh
+# gets the right one for the platform, and it is far too large to carry here.
+plugin/third_party/ort-*.tgz
+plugin/third_party/onnxruntime/
+
+# Device-authorisation leftovers. A QR for a login flow is single-use and
+# belongs to whoever ran it, not to the repository.
+lark-auth-qr.png
