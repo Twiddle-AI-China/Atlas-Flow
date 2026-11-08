@@ -208,6 +208,10 @@ const STRINGS = {
   'wire.direct':        ['直通，无重采样', 'direct, no resampling'],
   'rate.switched':      ['输出采样率已切换，音频链路已重建',
                          'output rate changed; the audio path was rebuilt'],
+  'rate.deviceChanged': ['输出设备已更换，采样率',
+                         'the output device changed; its rate is now'],
+  'wire.mismatch':      ['与设备不符，由系统持续重采样',
+                         'does not match the device; the OS is resampling'],
   'curtain.device':     ['已检测到输出设备', 'output device detected at'],
   'curtain.deviceUnknown': ['无法检测输出设备采样率，请在设置里手动指定',
                             'could not detect the output device rate; set it in settings'],
@@ -341,9 +345,49 @@ const distance = (a, b, dims) => {
   return Math.sqrt(sum);
 };
 
+/**
+ * Who is near whom, and what a move between them actually costs.
+ *
+ * Two different graphs overlap here and they are not the same shape. This one
+ * -- k=3 nearest neighbours in the full 8-D space -- is proximity, and on its
+ * own it makes the atlas look like a single connected object. The runtime
+ * routes on the *mutual* kNN the server sends as `mutualEdges`, which has
+ * fewer edges and more than one component, and it asks exactly one question of
+ * a move: are these two in the same component? If they are, graph_path finds a
+ * way and the timbre glides. If they are not there is no path at all, and the
+ * voice restarts however near the two dots look.
+ *
+ * So every drawn pair is one of three things, and the drawing says which:
+ *
+ *   road       a direct mutual-kNN hop -- the morph travels straight down it
+ *   reachable  no direct road, but the graph connects them
+ *   jump       different colonies: a restart, every time
+ *
+ * Saying "that is usually where roaming jumps" in the caption and then drawing
+ * every line alike left the one fact a player needs off the picture.
+ */
 function buildNeighbourGraph() {
+  const roads = new Set((status.mutualEdges || []).map(([a, b]) => `${Math.min(a, b)}:${Math.max(a, b)}`));
   const seen = new Set();
   const found = [];
+  const add = (index, j) => {
+    const key = index < j ? `${index}:${j}` : `${j}:${index}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const cell = cells[index];
+    const other = cells[j];
+    const d = distance(cell.pca, other.pca, 8);
+    const flat = distance(cell.pca, other.pca, 2);
+    found.push({
+      a: cell, b: other, d,
+      // How much of the separation survives the projection. Low means the
+      // pair is drawn far closer together than it really is.
+      shown: d > 1e-6 ? flat / d : 1,
+      link: roads.has(key) ? 'road'
+        : cell.component === other.component ? 'reachable' : 'jump',
+    });
+  };
+
   cells.forEach((cell, index) => {
     const ranked = cells
       .map((other, j) => ({other, j, d: distance(cell.pca, other.pca, 8)}))
@@ -351,24 +395,35 @@ function buildNeighbourGraph() {
       .sort((left, right) => left.d - right.d)
       .slice(0, KNN);
     cell.neighbours = ranked.map(item => item.other);
-    for (const item of ranked) {
-      const key = index < item.j ? `${index}:${item.j}` : `${item.j}:${index}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const flat = distance(cell.pca, item.other.pca, 2);
-      found.push({
-        a: cell, b: item.other, d: item.d,
-        // How much of the separation survives the projection. Low means the
-        // pair is drawn far closer together than it really is.
-        shown: item.d > 1e-6 ? flat / item.d : 1,
-      });
-    }
+    for (const item of ranked) add(index, item.j);
   });
+  // Every road is drawn whether or not it is anyone's third-nearest. A few are
+  // not, and leaving those out would hide a route that exists.
+  for (const [a, b] of status.mutualEdges || []) {
+    if (cells[a] && cells[b]) add(a, b);
+  }
+
   const near = Math.min(...found.map(edge => edge.d));
   const far = Math.max(...found.map(edge => edge.d));
   const span = Math.max(far - near, 1e-6);
   for (const edge of found) edge.weight = 1 - (edge.d - near) / span;
   edges = found;
+}
+
+/** Stroke style for one edge: hue for a road, grey for scenery, the loner
+    colour for a pair that is cut off -- the same colour a stranded preset
+    wears, for the same reason. */
+function edgeInk(edge, emphasis = 0) {
+  if (edge.link === 'road') return role('edge', Number((0.10 + 0.22 * edge.weight + emphasis).toFixed(3)));
+  if (edge.link === 'jump') return role('loner', Number((0.30 + 0.25 * edge.weight + emphasis).toFixed(3)));
+  return tint(Number((0.05 + 0.03 * edge.weight + emphasis).toFixed(3)));
+}
+
+/** A road is solid unless the projection folds it; everything else is dotted,
+    because it is not a thing you can travel. */
+function edgeDash(edge) {
+  if (edge.link !== 'road') return [1, 3];
+  return edge.shown < FOLDED ? [2, 4] : [];
 }
 
 /** Trace one edge; the caller owns stroke style and dash. */
@@ -563,12 +618,26 @@ function coverageField(view, ink) {
     }
   }
   cell.putImageData(image, 0, 0);
+  // Over the plane the presets occupy, not over the whole canvas.
+  //
+  // The field is a function of the atlas on [-1,1], and toPixel() insets that
+  // square by `pad` on every side. Stretching it edge to edge therefore slid
+  // the whole terrain off the atlas it describes by the width of the pad: the
+  // basin drawn under a preset belonged to a coordinate 64 px away.
+  const plane = planeRect(view);
   ink.save();
   ink.imageSmoothingEnabled = true;
   ink.imageSmoothingQuality = 'high';
-  ink.drawImage(grid, 0, 0, view.width, view.height);
+  ink.drawImage(grid, plane.left, plane.top, plane.width, plane.height);
   ink.restore();
   contourLines(view, ink, smooth);
+}
+
+/** Where [-1,1] x [-1,1] actually lands, in pixels. */
+function planeRect(view) {
+  const [left, top] = view.toPixel([-1, 1]);
+  const [right, bottom] = view.toPixel([1, -1]);
+  return {left, top, width: right - left, height: bottom - top};
 }
 
 /**
@@ -582,8 +651,9 @@ function coverageField(view, ink) {
 const CONTOURS = [0.28, 0.42, 0.56, 0.70, 0.84];
 
 function contourLines(view, ink, height) {
-  const step = view.width / (FIELD_GRID - 1);
-  const stepY = view.height / (FIELD_GRID - 1);
+  const plane = planeRect(view);
+  const step = plane.width / (FIELD_GRID - 1);
+  const stepY = plane.height / (FIELD_GRID - 1);
   const at = (row, column) => height[row * FIELD_GRID + column];
   ink.save();
   ink.lineWidth = 1;
@@ -602,8 +672,8 @@ function contourLines(view, ink, height) {
         const code = (a > level ? 8 : 0) | (b > level ? 4 : 0)
                    | (c > level ? 2 : 0) | (d > level ? 1 : 0);
         if (code === 0 || code === 15) continue;
-        const x0 = column * step;
-        const y0 = row * stepY;
+        const x0 = plane.left + column * step;
+        const y0 = plane.top + row * stepY;
         const mix = (p, q) => (level - p) / ((q - p) || 1e-9);
         const top = [x0 + step * mix(a, b), y0];
         const rightEdge = [x0 + step, y0 + stepY * mix(b, c)];
@@ -684,8 +754,8 @@ function paintStatic() {
   // projection is lying about it.
   ink.lineWidth = 1;
   for (const edge of edges) {
-    ink.strokeStyle = role('edge', Number((0.10 + 0.22 * edge.weight).toFixed(3)));
-    ink.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
+    ink.strokeStyle = edgeInk(edge);
+    ink.setLineDash(edgeDash(edge));
     edgePath(ink, edge);
   }
   ink.setLineDash([]);
@@ -707,8 +777,8 @@ function drawMap() {
     paint.lineWidth = 1;
     for (const edge of edges) {
       if (edge.a !== sounding && edge.b !== sounding) continue;
-      paint.strokeStyle = role('edge', Number((0.38 + 0.42 * edge.weight).toFixed(3)));
-      paint.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
+      paint.strokeStyle = edgeInk(edge, 0.28);
+      paint.setLineDash(edgeDash(edge));
       edgePath(paint, edge);
     }
     paint.setLineDash([]);
@@ -1600,13 +1670,11 @@ function profile() {
 async function connect() {
   const wire = profile();
   const targetSeconds = Number($('#buffer').value);
-  const forced = forcedRate();
+  const forced = contextRate(wire?.sampleRate || 0);
   if (!live.context || (forced && live.context.sampleRate !== forced)) {
     await live.context?.close();
-    // Normally no sampleRate at all: forcing the context to the wire rate does
-    // not avoid a conversion when the device runs at something else, it hands
-    // the conversion to the browser and the OS, continuously and invisibly.
-    // The context comes up at the device rate and the sink resamples into it.
+    // Matched to the wire where the device disagrees, so the worklet runs at
+    // ratio 1.0 and the OS does the conversion instead. See contextRate().
     live.context = new AudioContext(
       forced ? {sampleRate: forced, latencyHint: 'playback'} : {latencyHint: 'playback'});
     await live.context.audioWorklet.addModule('/live-player-worklet.js');
@@ -1677,13 +1745,22 @@ async function connect() {
       // rate mismatch and the only way to see one is to print both ends.
       const out = live.context ? live.context.sampleRate : 0;
       const converting = out && Math.abs(out - value.sampleRate) > 1;
+      // [OUT] used to be labelled "output device" and compared against the
+      // wire, so a context forced to 44.1 kHz in front of a 48 kHz output read
+      // "direct, no resampling" -- the one mismatch that buzzes, described as
+      // the one thing it was not. The device gets its own line and its own
+      // comparison; it is the only pair the OS actually resamples between.
+      const device = detectDeviceRate();
+      const offDevice = out && device && Math.abs(out - device) > 1;
       $('#wire').textContent =
         `[WIRE] ${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
         + `${value.format} · ${t('wire.ceiling')} ${value.kbitPerSecond} kbit/s\n`
-        + `[OUT]  ${out ? out / 1000 + 'kHz' : '?'} ${t('wire.device')}`
+        + `[CTX]  ${out ? out / 1000 + 'kHz' : '?'}`
         + (converting
             ? ` · ${t('wire.resampled')} ${(value.sampleRate / out).toFixed(4)}x`
-            : ` · ${t('wire.direct')}`);
+            : ` · ${t('wire.direct')}`)
+        + `\n[DEV]  ${device ? device / 1000 + 'kHz' : '?'} ${t('wire.device')}`
+        + (offDevice ? ` · ${t('wire.mismatch')}` : '');
     }
     if (value.type === 'telemetry') {
       live.lifecycle = value.lifecycle;
@@ -1843,12 +1920,65 @@ function toggleRecording() {
 
 async function filePlayback() {
   if (live.fileChain) return live.fileChain;
-  const context = new AudioContext();
-  const chain = buildChain(context);
-  context.createMediaElementSource($('#player')).connect(chain.input);
-  live.fileContext = context;
-  live.fileChain = chain;
-  return chain;
+  // The rate picker used to rebuild only the live path, so a clip went on
+  // playing at the device rate while roaming ran at the chosen one.
+  // Rendered takes come back at the model's own rate, so the same argument as
+  // contextRate() applies: match it and let the OS resample.
+  const forced = contextRate(status?.sampleRate || 0);
+  const context = new AudioContext(forced ? {sampleRate: forced} : {});
+  try {
+    const chain = buildChain(context);
+    context.createMediaElementSource($('#player')).connect(chain.input);
+    live.fileContext = context;
+    live.fileChain = chain;
+    return chain;
+  } catch (error) {
+    // A half-built context left open still costs one of the handful a page is
+    // allowed, so the attempt after this one would fail for *that* reason --
+    // a much harder thing to read off an error message than the real cause.
+    await context.close().catch(() => {});
+    throw error;
+  }
+}
+
+/** The clip player's listeners, as a function because the element is replaced. */
+function bindPlayer(player) {
+  player.addEventListener('play', () => {
+    if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
+  });
+  player.addEventListener('playing', restoreScopeSource);
+  player.addEventListener('ended', restoreScopeSource);
+  player.addEventListener('pause', restoreScopeSource);
+}
+
+/**
+ * Tear the clip path down, <audio> element included.
+ *
+ * A media element can back exactly one MediaElementAudioSourceNode for its
+ * whole life -- not one per context, one ever -- so closing the context that
+ * node lived in does not hand the element back. Dropping the chain and keeping
+ * the element is what made changing the output rate poison clip playback for
+ * the rest of the session: every later filePlayback() asked the same <audio>
+ * for a second source node, got InvalidStateError, and there was no way out
+ * short of reloading the window. So the element goes with the context.
+ */
+async function closeFilePlayback() {
+  const stale = $('#player');
+  stale.pause();
+  // close() fires no 'ended', so these would stay set and the next
+  // stopPreview()/stopLoop() would reach into a chain that no longer exists.
+  preview.source = null;
+  preview.gain = null;
+  live.loop = null;
+  await live.fileContext?.close().catch(() => {});
+  live.fileContext = null;
+  live.fileChain = null;
+
+  const fresh = document.createElement('audio');
+  fresh.id = 'player';
+  fresh.preload = 'none';
+  stale.replaceWith(fresh);
+  bindPlayer(fresh);
 }
 
 /**
@@ -1991,6 +2121,7 @@ function playPreview(buffer, cell = null) {
 
 function stopPreview(fade = 0.02) {
   if (!preview.source) return;
+  if (!live.fileChain) { preview.source = null; preview.gain = null; return; }
   const {context} = live.fileChain;
   const when = context.currentTime;
   try {
@@ -2359,6 +2490,7 @@ async function playLooping(url, label, releaseSeconds) {
 
 function stopLoop(fade = 0.05) {
   if (!live.loop) return;
+  if (!live.fileChain) { live.loop = null; return; }
   const {context} = live.fileChain;
   const when = context.currentTime;
   try {
@@ -2574,10 +2706,87 @@ function detectDeviceRate() {
   return deviceRate;
 }
 
-/** The rate to open playback contexts at: 0 means "whatever the device is". */
+/**
+ * Tear the whole audio path down and bring it back.
+ *
+ * A context's sample rate is fixed at construction, so anything that changes
+ * the rate -- the setting, or the output device itself -- can only be honoured
+ * by rebuilding: socket, context, worklet, compressor chain, and the clip
+ * element along with them.
+ */
+async function rebuildAudio(message) {
+  stopAll();
+  live.socket?.close();
+  live.socket = null;
+  live.connected = false;
+  await live.context?.close().catch(() => {});
+  live.context = null;
+  live.chain = null;
+  await closeFilePlayback();
+  live.player = null;
+  if (audioMode() === 'live') connect().catch(() => {});
+  setWork(message);
+}
+
+/**
+ * Follow the output hardware.
+ *
+ * detectDeviceRate() caches, which was enough while it only had to answer once
+ * at load. It is not enough across an interface being plugged in: the cached
+ * number goes stale, every open context keeps the rate it was born with --
+ * Chromium does not rebuild them -- and the OS resamples into the new device
+ * for the rest of the session. That is broadband and content-independent,
+ * which is what an atonal buzz behind everything sounds like, and nothing on
+ * screen changed to account for it. So re-probe, and rebuild if it moved.
+ */
+function watchDeviceChanges() {
+  if (! navigator.mediaDevices?.addEventListener) return;
+  navigator.mediaDevices.addEventListener('devicechange', async () => {
+    const before = deviceRate;
+    deviceRate = 0;                       // the whole point is not to trust it
+    const found = detectDeviceRate();
+    if (! found || found === before) return;
+    await rebuildAudio(`${t('rate.deviceChanged')} ${found / 1000} kHz`);
+  });
+}
+
+/** An explicitly chosen output rate, or 0 for automatic. */
 function forcedRate() {
   const chosen = Number($('#outrate')?.value || 0);
   return Number.isFinite(chosen) && chosen > 0 ? chosen : 0;
+}
+
+/**
+ * What rate to open a playback context at. 0 means "let the browser decide".
+ *
+ * A conversion has to happen somewhere whenever the stream and the output
+ * device disagree, and the only choice is who does it. Opening the context at
+ * the device rate puts it in the worklet, whose resampler is a Catmull-Rom
+ * cubic: not band-limited, roughly -30 to -40 dB of stopband. At 44.1 -> 48
+ * that touches essentially every sample -- measured, 198835 of 200000 land on
+ * a non-zero fractional phase -- and broadband, content-independent junk
+ * behind everything is exactly what an atonal buzz is.
+ *
+ * Opening it at the *stream* rate instead makes the worklet's ratio exactly
+ * 1.0, where it degenerates to a bit-exact copy, and hands the conversion to
+ * the OS mixer, whose resampler is windowed-sinc. So automatic follows the
+ * stream when the two differ, not the device. An explicit choice still wins --
+ * that is what the setting is for, and a virtual audio device can need one.
+ *
+ * Only for profiles at the model's own rate or above, though. preferredProfile
+ * below records a real bad experience with forcing the context to 22.05 kHz,
+ * and that observation is kept rather than argued with: those profiles are
+ * deliberately band-limited, the fidelity argument does not apply to them, and
+ * whatever went wrong there is not worth re-running to find out. Below 44.1
+ * this stays out of the way and the worklet interpolates as before.
+ */
+function contextRate(streamRate) {
+  const chosen = forcedRate();
+  if (chosen) return chosen;
+  const device = detectDeviceRate();
+  if (!streamRate || !device || streamRate === device) return 0;
+  if (streamRate < 44100) return 0;
+  return streamRate;
 }
 
 /**
@@ -2782,24 +2991,12 @@ function wire() {
       applyCompressor(live.fileChain);
     });
   }
-  // Changing the output rate has to rebuild the context, so reconnect.
   $('#outrate').value = localStorage.getItem('atlas.outrate') || '0';
   $('#outrate').addEventListener('change', async event => {
     localStorage.setItem('atlas.outrate', event.target.value);
-    // The rate is fixed when a context is created, so this has to tear the
-    // whole audio path down: socket, context, worklet and compressor chain.
-    stopAll();
-    live.socket?.close();
-    live.socket = null;
-    live.connected = false;
-    await live.context?.close().catch(() => {});
-    live.context = null;
-    live.chain = null;
-    live.fileChain = null;
-    live.player = null;
-    if (audioMode() === 'live') connect().catch(() => {});
-    setWork(t('rate.switched'));
+    await rebuildAudio(t('rate.switched'));
   });
+  watchDeviceChanges();
   $('#theme').value = document.documentElement.dataset.theme || 'mono';
   $('#theme').addEventListener('change', event => applyTheme(event.target.value));
   $('#lang').value = language;
@@ -2858,13 +3055,7 @@ function wire() {
       warmPreviews();
     }
   });
-  const player = $('#player');
-  player.addEventListener('play', () => {
-    if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
-  });
-  player.addEventListener('playing', restoreScopeSource);
-  player.addEventListener('ended', restoreScopeSource);
-  player.addEventListener('pause', restoreScopeSource);
+  bindPlayer($('#player'));
 
   window.addEventListener('keydown', event => {
     const key = event.key.toLowerCase();

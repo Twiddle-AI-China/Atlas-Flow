@@ -304,6 +304,21 @@ def create_app(
         payload["releaseSeconds"] = RELEASE_SECONDS
         payload["presetIds"] = list(request.app[_ENGINE].atlas.preset_ids)
         payload["streamProfiles"] = supported_profiles(LIVE_BLOCK_SAMPLES)
+        # The road network, as pairs of preset indices.
+        #
+        # The map draws a k=3 nearest-neighbour graph it works out for itself,
+        # which makes the atlas look like one connected object. The runtime
+        # routes on *this* instead -- the mutual kNN -- and it is a different
+        # shape: fewer edges, and more than one component, so a move between
+        # two colonies has no path and restarts the voice. Without this the
+        # client cannot tell the two apart and draws every line alike.
+        knn = request.app[_ENGINE].atlas.mutual_knn
+        payload["mutualEdges"] = [
+            [int(a), int(b)]
+            for a in range(knn.shape[0])
+            for b in range(a + 1, knn.shape[1])
+            if bool(knn[a][b])
+        ]
         payload["pcaExplained"] = explained_variance(request.app[_ENGINE])
         # The client cannot tell a local server from a tunnelled one — both are
         # 127.0.0.1 in the browser — so the server states which it is and what

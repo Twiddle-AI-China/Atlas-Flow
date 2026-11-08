@@ -87,14 +87,43 @@ function cacheDir() {
   return path.join(app.getPath('userData'), 'model-cache');
 }
 
-function freePort() {
-  return new Promise((resolve, reject) => {
+/** Is this port ours to take right now? */
+function available(port) {
+  return new Promise(resolve => {
     const probe = net.createServer();
     probe.unref();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const {port} = probe.address();
-      probe.close(() => resolve(port));
+    probe.on('error', () => resolve(false));
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)));
+  });
+}
+
+/**
+ * The same port every launch, where that is possible.
+ *
+ * The port is part of the origin, and the origin is what Chromium files
+ * localStorage under. Asking the OS for any free port -- listen(0) -- meant a
+ * different origin every single launch, so the window came up with an empty
+ * store every time and the theme, the language and the output rate setting
+ * were silently forgotten between sessions. They were being saved correctly
+ * all along; they were being saved somewhere nothing would ever read again.
+ *
+ * So: one fixed port, and only if something else already holds it do we fall
+ * back to whatever the OS offers -- accepting, in that one case, that this
+ * session starts from defaults.
+ */
+const PREFERRED_PORT = 18796;
+
+function freePort() {
+  return available(PREFERRED_PORT).then(ours => {
+    if (ours) return PREFERRED_PORT;
+    return new Promise((resolve, reject) => {
+      const probe = net.createServer();
+      probe.unref();
+      probe.on('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const {port} = probe.address();
+        probe.close(() => resolve(port));
+      });
     });
   });
 }
