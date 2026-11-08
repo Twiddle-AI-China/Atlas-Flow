@@ -1,0 +1,106 @@
+name: Atlas Flow plugin (Windows)
+
+# Proves the plugin still builds and still makes sound on Windows.
+#
+# This exists because the Windows target was promised in the proposal and had
+# never once been compiled -- every line of the port was written and verified
+# on macOS, so the platform-specific half (no rpath, a different bundle layout,
+# no AU, no code signing) had no evidence behind it at all. A build that nobody
+# has run is not a port.
+#
+# What it does NOT do is run the model engine. The two graphs are ~92 MB and
+# exporting them needs torch; uploading them as artifacts is what exhausted the
+# organisation's 500 MB shared-storage allowance once already and blocked
+# Actions across every repository. So the render test runs against the mock
+# engine, which still exercises the whole MIDI and audio path -- pitch, octave
+# folding, the voice ceiling, whether moving across the map changes the timbre
+# -- and leaves ONNX covered by the macOS runs and the Linux export gate.
+
+on:
+  push:
+    branches: ["main", "v1", "v2"]
+    paths:
+      - "plugin/**"
+      - ".github/workflows/atlas-flow-plugin-windows.yml"
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and render-check
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive      # JUCE
+
+      - name: Fetch ONNX Runtime
+        shell: bash
+        run: plugin/tools/fetch_onnxruntime.sh
+
+      - name: Confirm the SDK is the Windows one
+        shell: bash
+        run: |
+          test -f plugin/third_party/onnxruntime/lib/onnxruntime.lib
+          test -f plugin/third_party/onnxruntime/lib/onnxruntime.dll
+          echo "VERSION_NUMBER: $(cat plugin/third_party/onnxruntime/VERSION_NUMBER)"
+
+      - name: Configure
+        run: cmake -S plugin -B plugin/build -A x64
+
+      - name: Build
+        run: cmake --build plugin/build --config Release --target AtlasFlowRenderTest AtlasFlowHostTest AtlasFlow_VST3 AtlasFlow_Standalone
+
+      # The DLL has to have landed beside each binary: there is no rpath to
+      # fall back on, so a missing copy is a load failure on a user's machine
+      # rather than anything this build would notice.
+      - name: Check the payload travelled
+        shell: bash
+        run: |
+          set -e
+          vst3="plugin/build/AtlasFlow_artefacts/Release/VST3/Atlas Flow.vst3"
+          standalone="plugin/build/AtlasFlow_artefacts/Release/Standalone"
+          test -f "$vst3/Contents/x86_64-win/Atlas Flow.vst3" || { echo "no vst3 module"; find "$vst3" -type f; exit 1; }
+          test -f "$vst3/Contents/x86_64-win/onnxruntime.dll" || { echo "dll missing from vst3"; exit 1; }
+          test -f "$standalone/onnxruntime.dll" || { echo "dll missing from standalone"; exit 1; }
+          echo "VST3 bundle:"; find "$vst3" -type f -exec ls -la {} \;
+
+      # The test sets ATLASFLOW_MODELS itself -- "none" for the mock section,
+      # then unset for the model section, which reports itself skipped when no
+      # graphs are present. So nothing is passed in here on purpose.
+      - name: Render check
+        shell: bash
+        run: ./plugin/build/AtlasFlowRenderTest_artefacts/Release/atlasflow-render-test.exe
+
+      # Everything above builds the processor directly and never goes near the
+      # wrapper. This loads the bundle the way a DAW does -- scan, instantiate,
+      # play, read the parameters, round-trip the state, open the editor -- so
+      # a VST3 that does not scan, or scans and publishes nonsense, fails here
+      # instead of in someone's session. There is no AU on Windows, so this is
+      # the VST3 arm only.
+      - name: Load it as a host does
+        shell: bash
+        run: |
+          ./plugin/build/AtlasFlowHostTest_artefacts/Release/atlasflow-host-test.exe \
+            --vst3 "plugin/build/AtlasFlow_artefacts/Release/VST3/Atlas Flow.vst3"
+
+      # The editor is the one part of the plugin that no assertion reaches, and
+      # it is a lot of new drawing code: five palettes, a terrain, marching
+      # squares, five scope views and an in-place image scroll. Painting it once
+      # per palette on Windows is a smoke test for all of it -- a bad Image
+      # stride, a missing font, a crash in the FFT -- and the PNGs are thrown
+      # away with the runner rather than uploaded, because artifact storage is
+      # what took CI out org-wide last time.
+      - name: Paint the editor
+        shell: bash
+        run: |
+          ./plugin/build/AtlasFlowRenderTest_artefacts/Release/atlasflow-render-test.exe \
+            --snapshot "$RUNNER_TEMP/atlas-flow-ui"
+          test "$(ls "$RUNNER_TEMP/atlas-flow-ui"/*.png | wc -l)" -eq 10

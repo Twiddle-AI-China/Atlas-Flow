@@ -1,0 +1,69 @@
+name: Atlas Flow ONNX export
+
+# Proves the model still exports to ONNX and that the exported graphs still
+# agree with torch. This is the gate that stops a refactor from silently
+# changing what the plugin will ship.
+#
+# Linux only, and deliberately so: this needs no GUI, no packaging and no
+# platform-specific runtime, so it runs on the 1x-multiplier runner rather than
+# macOS at 10x. It also uploads nothing -- the two graphs are ~92 MB and the
+# organisation's shared-storage allowance is 500 MB, which an earlier workflow
+# exhausted and thereby blocked Actions across every repository in the org. The
+# manifest is printed into the log instead.
+
+on:
+  push:
+    branches: ["main", "v1", "v2", "frontend"]
+    paths:
+      - "src/midibrave/atlas_flow_model.py"
+      - "src/midibrave/model.py"
+      - "src/midibrave/atlas_flow_config.py"
+      - "scripts/atlas_flow/export_onnx.py"
+      - "packaging/make_test_model.py"
+      - ".github/workflows/atlas-flow-export.yml"
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    name: Export and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU torch: the default index would pull gigabytes of CUDA for a job
+          # that never touches a GPU.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install numpy scipy soundfile PyYAML onnx onnxruntime onnxscript
+
+      - name: Build a test model
+        # The real weights live on a cluster no runner can reach. The export
+        # machinery does not care which weights it is given, only that their
+        # shapes are right, so random ones exercise everything this job checks.
+        run: python packaging/make_test_model.py --out build/test-model
+
+      - name: Export to ONNX and check against torch
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/atlas_flow/export_onnx.py \
+            --model build/test-model \
+            --out build/onnx
+
+      - name: Show the manifest
+        if: always()
+        run: cat build/onnx/manifest.json || echo "no manifest produced"

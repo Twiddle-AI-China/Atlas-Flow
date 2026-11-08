@@ -211,6 +211,36 @@ class AtlasConditionedTrajectoryFlow(nn.Module):
             history_mask = torch.ones(batch, cfg.context_frames, dtype=torch.bool, device=history.device)
         if history_mask.shape != (batch, cfg.context_frames) or not history_mask.any(1).all():
             raise ValueError("history_mask must expose at least one frame per sample")
+        return self.evaluate(
+            noisy_residual, flow_time, history, history_anchor,
+            anchor_path, atlas_path, lifecycle, history_mask,
+        )
+
+    def evaluate(
+        self,
+        noisy_residual: Tensor,
+        flow_time: Tensor,
+        history: Tensor,
+        history_anchor: Tensor,
+        anchor_path: Tensor,
+        atlas_path: Tensor,
+        lifecycle: Tensor,
+        history_mask: Tensor,
+    ) -> Tensor:
+        """The velocity field itself, with no validation and no optional arguments.
+
+        ``forward`` is this plus the argument checking, and the checking is why
+        it exists separately: those checks are python-level ``if`` statements
+        over tensor *values*, which ``torch.export`` cannot trace. Exporting
+        ``forward`` therefore falls back to the deprecated TorchScript path,
+        while exporting this traces cleanly. The maths is identical -- it is
+        the same code, called from one place -- so an export can never silently
+        drift from what training and the python runtime do.
+
+        Callers inside the repository should still use ``forward``; this is for
+        ``scripts/atlas_flow/export_onnx.py``.
+        """
+        cfg = self.config
         memory_input = torch.cat((history - history_anchor, history_anchor), -1)
         memory = self.history_projection(memory_input) + self.history_position
         memory = self.context(memory, src_key_padding_mask=~history_mask)
